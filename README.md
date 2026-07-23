@@ -125,20 +125,32 @@ MODEL=model/Qwen3-1.7B ./script/run_eval_zeroshot_retriever.sh
 
 ### 결과 (2026-07-23, n=2,146, Qwen3-0.6B, 학습 없음)
 
-| k | Recall@k (정확한 tool) | Domain-only Recall@k |
-|---|---|---|
-| 1 | 28.1% | 47.8% |
-| 3 | 45.1% | 71.3% |
-| 5 | 52.4% | 80.6% |
-| 10 | 61.9% | 91.6% |
+`Recall@k`(정확한 tool이 top-k 안에 있는지)가 진짜 성능 지표. `Domain-only Recall@k`(top-k 중
+하나라도 정답과 같은 domain인지)는 참고용으로 같이 쟀는데, **domain이 3개뿐이고 corpus 152개 중
+smart_car 86개(57%)/smart_home 53개(35%)로 큰 domain이 절반 가까이를 차지**해서 k가 커지면
+거의 랜덤과 구분이 안 됨 — 그래서 랜덤 베이스라인을 같이 표시함(도구를 무작위로 k개 뽑았을 때
+같은 domain이 하나라도 걸릴 확률, 조합론으로 계산: `1 - C(N-m,k)/C(N,k)`, 실제 쿼리의 domain 분포로
+가중평균).
 
-랜덤(5/152≈3.3%)보다 훨씬 낫지만 **top-5 안에 정답이 있을 확률이 52.4%뿐**이라, 이 retriever를
-그대로 하드 컷오프로 파이프라인에 연결하면(top-5만 LLM에 줌) 전체 정확도가 대략
+| k | Recall@k (정확한 tool) | Domain-only Recall@k | 랜덤 베이스라인 (domain-only) |
+|---|---|---|---|
+| 1 | 28.1% | 47.8% | 31.8% |
+| 3 | 45.1% | 71.3% | 65.3% |
+| 5 | 52.4% | 80.6% | 80.0% |
+| 10 | 61.9% | 91.6% | 91.9% |
+
+**k=5부터는 domain-only recall이 랜덤과 사실상 동일**(80.6% vs 80.0%, 91.6% vs 91.9%) — zero-shot
+retriever가 domain 레벨에서는 랜덤보다 나을 게 없다는 뜻. k=1,3에서만 랜덤 대비 유의미한 차이가
+있음(+16%p, +6%p). 결론적으로 이 지표는 "retriever가 적어도 엉뚱한 domain으로 새지는 않는지"를
+확인하는 용도로만 쓸모 있고, 실전 성능 판단은 정확한 tool의 Recall@k로 해야 함.
+
+랜덤(5/152≈3.3%)보다 recall@k는 훨씬 낫지만 **top-5 안에 정답이 있을 확률이 52.4%뿐**이라, 이
+retriever를 그대로 하드 컷오프로 파이프라인에 연결하면(top-5만 LLM에 줌) 전체 정확도가 대략
 52.4%×0.97(top-5-with-GT일 때의 LLM 성공률) ≈ **51%** 로, 오히려 152개 전체를 그냥 주는 것(64.4%)보다
 못하다 — retriever가 후보를 잘못 좁히면 정답 자체가 사라지는 하드 실패 모드가 생기기 때문. 즉
 **학습 없는 zero-shot retriever는 아직 실전 투입 수준이 아님.** 두 가지 방향이 남음:
-(1) k를 10~20 정도로 넉넉히 잡거나(domain-only recall@10=91.6%로 훨씬 나음), (2) 8개 tier를 합친
-~16,843개 라벨 데이터에서 자체 train/dev/test를 만들어 실제로 학습.
+(1) k를 10~20 정도로 넉넉히 잡거나, (2) 8개 tier를 합친 ~16,843개 라벨 데이터에서 자체
+train/dev/test를 만들어 실제로 학습.
 
 ### (1)번 확인: k를 넓혀서 진짜 파이프라인을 돌려보면?
 
@@ -174,19 +186,21 @@ python src/eval_zeroshot_retriever.py --model model/Qwen3-0.6B \
   --lora_adapter ../noise_aware_slu/experiments/retriever_train/qwen3-0.6b_depth0.1_seed44_5ep/epoch5
 ```
 
-| k | Zero-shot (학습 0) | STOP 학습 retriever (Audio2Tool 학습 0, transfer만) |
-|---|---|---|
-| recall@1 | 28.1% | 26.9% |
-| recall@3 | 45.1% | 46.9% |
-| recall@5 | 52.4% | **55.7%** |
-| recall@10 | 61.9% | **66.2%** |
-| domain-only@5 | 80.6% | **91.3%** |
-| domain-only@10 | 91.6% | **96.6%** |
+| k | Zero-shot (학습 0) | STOP 학습 retriever (Audio2Tool 학습 0, transfer만) | 랜덤 베이스라인 (domain-only) |
+|---|---|---|---|
+| recall@1 | 28.1% | 26.9% | - |
+| recall@3 | 45.1% | 46.9% | - |
+| recall@5 | 52.4% | **55.7%** | - |
+| recall@10 | 61.9% | **66.2%** | - |
+| domain-only@5 | 80.6% (≈랜덤 80.0%) | **91.3%** | 80.0% |
+| domain-only@10 | 91.6% (≈랜덤 91.9%) | **96.6%** | 91.9% |
 
 STOP taxonomy를 한 번도 안 보고 Audio2Tool taxonomy도 학습에 전혀 안 썼는데, recall@1만 소폭
-하락하고(STOP 관습에 맞춰진 편향 추정) recall@5/10과 domain-only recall은 확실히 개선됨 — "발화를
-intent 의미공간에 매핑하는" 능력 자체가 데이터셋을 넘어 어느 정도 전이된다는 뜻. Audio2Tool 전용
-학습(옵션 2)을 하면 이 전이 성능이 하한선 역할을 해줄 걸로 기대됨.
+하락하고(STOP 관습에 맞춰진 편향 추정) recall@5/10은 확실히 개선됨. domain-only recall도 STOP
+학습본은 랜덤(80.0%/91.9%)을 확실히 상회하는 반면(위 절에서 확인했듯 zero-shot 쪽은 랜덤과
+거의 동일) — STOP 학습이 최소한 domain 레벨의 신호는 진짜로 배웠다는 뜻. "발화를 intent 의미공간에
+매핑하는" 능력 자체가 데이터셋을 넘어 어느 정도 전이된다는 걸 recall@k(정확한 tool 기준)로도
+확인. Audio2Tool 전용 학습(옵션 2)을 하면 이 전이 성능이 하한선 역할을 해줄 걸로 기대됨.
 
 ## 재사용
 
