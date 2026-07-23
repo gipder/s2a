@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-Zero-shot (no training) retriever baseline for Audio2Tool Tier-1.
+Retriever baseline for Audio2Tool Tier-1 -- zero-shot, or a STOP-trained
+LoRA adapter transferred cross-domain with zero Audio2Tool-specific training.
 
 Audio2Tool ships no train split -- every tier is HF-config'd as `split: test`
-only, so a STOP-style contrastively-fine-tuned retriever needs its own
-train/dev/test carve-out first (see README "다음 단계"). This script instead
-asks a cheaper first question: how far does an OFF-THE-SHELF embedding model
-get with zero training, using the same PromptEOL + last-token-pooling recipe
-noise_aware_slu/retriever validated as a strong zero-shot baseline on STOP
-(domain_acc 48.3% -> 82.0%, intent_acc 14.3% -> 49.3% with Qwen3-0.6B).
+only, so a from-scratch STOP-style contrastively-fine-tuned retriever needs
+its own train/dev/test carve-out first (see README "다음 단계"). This script
+instead asks two cheaper questions first: (1) how far does an OFF-THE-SHELF
+embedding model get with zero training, and (2) does a retriever already
+trained on STOP (a different dataset, different tool taxonomy) transfer at
+all -- via --lora_adapter pointing at one of noise_aware_slu's checkpoints.
+Same PromptEOL + last-token-pooling recipe noise_aware_slu/retriever
+validated as a strong zero-shot baseline on STOP (domain_acc 48.3% -> 82.0%,
+intent_acc 14.3% -> 49.3% with Qwen3-0.6B) either way -- the LoRA adapter is
+just extra weights merged into the same encoder, sharing X (utterance) and Y
+(target_text) as noise_aware_slu/retriever/src/train_retriever.py does.
 
 Corpus: 152 tool texts (signature + description) from tools_registry.csv.
 Queries: Tier-1's 2,146 unique utterances.
@@ -22,6 +28,10 @@ replace the oracle's guaranteed-GT-inclusion assumption.
 Usage:
     python src/eval_zeroshot_retriever.py --model model/Qwen3-0.6B
     python src/eval_zeroshot_retriever.py --model model/Qwen3-0.6B --n_queries 200  # pilot
+
+    # STOP-trained retriever, no Audio2Tool training at all:
+    python src/eval_zeroshot_retriever.py --model model/Qwen3-0.6B \\
+        --lora_adapter ../noise_aware_slu/experiments/retriever_train/qwen3-0.6b_depth0.1_seed44_5ep/epoch5
 """
 from __future__ import annotations
 
@@ -30,6 +40,7 @@ import json
 from pathlib import Path
 
 import torch
+from peft import PeftModel
 from transformers import AutoModel, AutoTokenizer
 
 from embedding_utils import encode_texts
@@ -47,6 +58,8 @@ def main(args: argparse.Namespace) -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModel.from_pretrained(args.model, torch_dtype=torch.bfloat16).to(args.device)
+    if args.lora_adapter:
+        model = PeftModel.from_pretrained(model, args.lora_adapter)
     model.eval()
 
     corpus_texts = [f"{t['signature']}: {t['description']}" for t in tools]
@@ -94,7 +107,8 @@ def main(args: argparse.Namespace) -> None:
         })
 
     n = len(queries)
-    print(f"\nZero-shot retriever ({args.model}) | n={n} queries, {len(tools)} tools")
+    label = f"STOP-trained retriever (LoRA={args.lora_adapter})" if args.lora_adapter else "Zero-shot retriever (no training)"
+    print(f"\n{label} | model={args.model} | n={n} queries, {len(tools)} tools")
     for k in topk_list:
         print(
             f"  recall@{k}: {hits[k]}/{n} = {hits[k] / n * 100:.1f}%   "
@@ -102,12 +116,20 @@ def main(args: argparse.Namespace) -> None:
         )
 
     model_name = Path(args.model).name
-    out_path = Path(args.output) if args.output else BASE_DIR / f"experiment/zeroshot_retriever/{model_name}.json"
+    # Adapter name folded into the default filename so a STOP-trained-retriever
+    # run doesn't collide with (or get mistaken for) the plain zero-shot run.
+    if args.lora_adapter:
+        adapter_path = Path(args.lora_adapter.rstrip("/"))
+        tag = f"{model_name}_lora-{adapter_path.parent.name}-{adapter_path.name}"
+    else:
+        tag = model_name
+    out_path = Path(args.output) if args.output else BASE_DIR / f"experiment/zeroshot_retriever/{tag}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(
             {
                 "model": args.model,
+                "lora_adapter": args.lora_adapter,
                 "n_queries": n,
                 "n_tools": len(tools),
                 "recall_at_k": {k: hits[k] / n * 100 for k in topk_list},
@@ -122,6 +144,11 @@ def main(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="model/Qwen3-0.6B")
+    p.add_argument("--lora_adapter", default=None,
+                    help="Path to a trained LoRA adapter (e.g. one of noise_aware_slu's STOP-trained "
+                         "retriever checkpoints) to test cross-domain transfer with zero Audio2Tool "
+                         "training. Must match --model as its base_model_name_or_path. Default: none "
+                         "(plain zero-shot base model)")
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--max_length", type=int, default=64)

@@ -161,6 +161,33 @@ RETRIEVED_FROM=experiment/zeroshot_retriever/Qwen3-0.6B.json RETRIEVED_TOPK=10 \
 부르기 민망한 수준이다. 결론: 학습 없이 k만 조절하는 접근(옵션 1)으로는 90%에 도달할 수 없고,
 성능을 올리려면 실제 학습(옵션 2, train/dev/test 자체 구성)이 필요함이 정량적으로 확인됨.
 
+### STOP으로 학습된 retriever를 그대로 가져오면 (Audio2Tool 학습 0)
+
+Audio2Tool 전용 학습 데이터를 만들기 전에, **완전히 다른 데이터셋(STOP)으로 학습된 retriever가
+Audio2Tool에 어느 정도나 전이(transfer)되는지** 먼저 확인. `eval_zeroshot_retriever.py
+--lora_adapter`로 `noise_aware_slu`의 STOP 학습 체크포인트
+(`qwen3-0.6b_depth0.1_seed44_5ep/epoch5`, contrastive dual-encoder LoRA, 5 epoch)를 그대로
+로드해서 X/Y 인코더로 씀 — Audio2Tool 데이터는 학습에 전혀 안 들어감.
+
+```bash
+python src/eval_zeroshot_retriever.py --model model/Qwen3-0.6B \
+  --lora_adapter ../noise_aware_slu/experiments/retriever_train/qwen3-0.6b_depth0.1_seed44_5ep/epoch5
+```
+
+| k | Zero-shot (학습 0) | STOP 학습 retriever (Audio2Tool 학습 0, transfer만) |
+|---|---|---|
+| recall@1 | 28.1% | 26.9% |
+| recall@3 | 45.1% | 46.9% |
+| recall@5 | 52.4% | **55.7%** |
+| recall@10 | 61.9% | **66.2%** |
+| domain-only@5 | 80.6% | **91.3%** |
+| domain-only@10 | 91.6% | **96.6%** |
+
+STOP taxonomy를 한 번도 안 보고 Audio2Tool taxonomy도 학습에 전혀 안 썼는데, recall@1만 소폭
+하락하고(STOP 관습에 맞춰진 편향 추정) recall@5/10과 domain-only recall은 확실히 개선됨 — "발화를
+intent 의미공간에 매핑하는" 능력 자체가 데이터셋을 넘어 어느 정도 전이된다는 뜻. Audio2Tool 전용
+학습(옵션 2)을 하면 이 전이 성능이 하한선 역할을 해줄 걸로 기대됨.
+
 ## 재사용
 
 - `src/action_metrics.py` — `noise_aware_slu/src/action_metrics.py`에서 포팅 + 확장. Audio2Tool의
