@@ -226,12 +226,13 @@ async def run_async(args: argparse.Namespace) -> None:
     system_prompt = queries[0]["instruction"]
     max_tokens = 1024 if args.enable_thinking else 64
 
-    if args.topk is not None and args.domain_filtered:
-        raise ValueError("--topk and --domain_filtered are mutually exclusive")
+    if sum(x is not None for x in [args.topk, args.retrieved_from]) + int(args.domain_filtered) > 1:
+        raise ValueError("--topk, --domain_filtered, --retrieved_from are mutually exclusive")
 
     tools_desc = (
-        f"top-{args.topk}" if args.topk
+        f"top-{args.topk} (oracle: GT+random distractors)" if args.topk
         else "domain-filtered (~53/86/13 per domain)" if args.domain_filtered
+        else f"top-{args.retrieved_topk} (REAL retriever, no GT guarantee)" if args.retrieved_from
         else str(len(tools))
     )
     log.info(
@@ -254,12 +255,57 @@ async def run_async(args: argparse.Namespace) -> None:
         for q in queries:
             candidates = filter_tools_by_domain(tools, q["tool_name"])
             prompts.append(build_user_prompt(q["query"], TOOL_FORMATS[args.tool_format](candidates), len(candidates)))
+    elif args.retrieved_from is not None:
+        # Real (non-oracle) retriever pipeline: candidates are whatever
+        # eval_zeroshot_retriever.py actually retrieved, GT may or may not be
+        # among them -- unlike --topk/--domain_filtered above, this can fail
+        # outright when the retriever's top-k misses the gold tool entirely.
+        if args.retrieved_topk < 1:
+            raise ValueError(f"--retrieved_topk must be >= 1, got {args.retrieved_topk}")
+        by_name = {t["tool_name"]: t for t in tools}
+        with open(args.retrieved_from) as f:
+            retrieved_raw = json.load(f)
+        if "samples" not in retrieved_raw:
+            raise ValueError(f"{args.retrieved_from} has no 'samples' key -- not an eval_zeroshot_retriever.py output?")
+        missing_field = [r["query_idx"] for r in retrieved_raw["samples"] if "retrieved_tools" not in r]
+        if missing_field:
+            raise ValueError(
+                f"{args.retrieved_from}: {len(missing_field)} sample(s) have no 'retrieved_tools' field "
+                f"(old schema used 'top5_tools' -- re-run eval_zeroshot_retriever.py to regenerate)"
+            )
+        saved_topk = len(retrieved_raw["samples"][0]["retrieved_tools"])
+        if args.retrieved_topk > saved_topk:
+            raise ValueError(
+                f"--retrieved_topk={args.retrieved_topk} exceeds the {saved_topk} candidates saved per "
+                f"query in {args.retrieved_from} (its --save_topk at eval_zeroshot_retriever.py run time) "
+                f"-- silently truncating would make the top-{args.retrieved_topk} log/filename tag lie "
+                f"about the actual candidate count; re-run eval_zeroshot_retriever.py with a larger --save_topk instead"
+            )
+        retrieved = {r["query_idx"]: r["retrieved_tools"] for r in retrieved_raw["samples"]}
+        missing_queries = [q["query_idx"] for q in queries if q["query_idx"] not in retrieved]
+        if missing_queries:
+            raise ValueError(
+                f"{len(missing_queries)}/{len(queries)} query_idx from this run are not present in "
+                f"{args.retrieved_from} (e.g. {missing_queries[:5]}) -- likely a --n_queries subsample "
+                f"mismatch between this run and the retriever run; use the same --n_queries (or none) for both"
+            )
+        unknown_names = {n for names in retrieved.values() for n in names[: args.retrieved_topk]} - set(by_name)
+        if unknown_names:
+            raise ValueError(
+                f"{args.retrieved_from} references tool name(s) not in {TOOLS_CSV}: {sorted(unknown_names)[:5]} "
+                f"-- registry may have changed since the retriever was run"
+            )
+        prompts = []
+        for q in queries:
+            names = retrieved[q["query_idx"]][: args.retrieved_topk]
+            candidates = [by_name[n] for n in names]
+            prompts.append(build_user_prompt(q["query"], TOOL_FORMATS[args.tool_format](candidates), len(candidates)))
     else:
         tools_str = TOOL_FORMATS[args.tool_format](tools)
         prompts = [build_user_prompt(q["query"], tools_str, len(tools)) for q in queries]
 
     semaphore = asyncio.Semaphore(args.concurrency)
-    store_full_prompt = args.topk is not None or args.domain_filtered
+    store_full_prompt = args.topk is not None or args.domain_filtered or args.retrieved_from is not None
 
     async def bounded_query(i: int) -> dict:
         async with semaphore:
@@ -297,6 +343,8 @@ async def run_async(args: argparse.Namespace) -> None:
         "tool_format": args.tool_format,
         "topk": args.topk,
         "domain_filtered": args.domain_filtered,
+        "retrieved_from": args.retrieved_from,
+        "retrieved_topk": args.retrieved_topk if args.retrieved_from else None,
         "system_prompt": system_prompt,  # identical for every sample -- stored once here, not per-sample
         "paper_target_acc": 85.6,
         "summary": {
@@ -313,7 +361,17 @@ async def run_async(args: argparse.Namespace) -> None:
     }
 
     think_tag = "think" if args.enable_thinking else "nothink"
-    topk_tag = f"top{args.topk}" if args.topk else "domainfiltered" if args.domain_filtered else "all152"
+    topk_tag = (
+        f"top{args.topk}" if args.topk
+        else "domainfiltered" if args.domain_filtered
+        # Includes the source retriever's own filename stem -- otherwise two
+        # different retrievers (e.g. Qwen3-0.6B.json vs Qwen3-1.7B.json) run
+        # at the same --retrieved_topk would collide on the same output path
+        # and silently overwrite each other, with no way to tell from the
+        # filename which retriever produced a given result.
+        else f"retrieved{args.retrieved_topk}-{Path(args.retrieved_from).stem}" if args.retrieved_from
+        else "all152"
+    )
     out_path = (
         Path(args.output) if args.output
         else BASE_DIR / f"experiment/tier1_oracle/{model_name}_{args.tool_format}_{topk_tag}_{think_tag}.json"
@@ -342,6 +400,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--domain_filtered", action="store_true",
                     help="All tools from the GT tool's own domain (~53/86/13 depending on "
                          "domain) instead of the full 152-tool list. Mutually exclusive with --topk")
+    p.add_argument("--retrieved_from", default=None,
+                    help="Path to eval_zeroshot_retriever.py output JSON -- use its actual "
+                         "retrieved candidates (real retriever, GT not guaranteed present) "
+                         "instead of the full 152-tool list. Mutually exclusive with --topk/--domain_filtered")
+    p.add_argument("--retrieved_topk", type=int, default=10,
+                    help="How many of --retrieved_from's ranked candidates to actually use")
     p.add_argument("--seed", type=int, default=42, help="RNG seed for --topk distractor sampling")
     p.add_argument("--output", default=None)
     return p.parse_args()

@@ -41,11 +41,14 @@ TOOLS_CSV = BASE_DIR / "data/Audio2Tool_mod/tools_registry.csv"
 
 
 def main(args: argparse.Namespace) -> None:
+    tools = load_tools(TOOLS_CSV)
+    if not (1 <= args.save_topk <= len(tools)):
+        raise ValueError(f"--save_topk must be in [1, {len(tools)}] (corpus size), got {args.save_topk}")
+
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModel.from_pretrained(args.model, torch_dtype=torch.bfloat16).to(args.device)
     model.eval()
 
-    tools = load_tools(TOOLS_CSV)
     corpus_texts = [f"{t['signature']}: {t['description']}" for t in tools]
     tool_names = [t["tool_name"] for t in tools]
     tool_domains = [t["domain"] for t in tools]
@@ -79,14 +82,15 @@ def main(args: argparse.Namespace) -> None:
                 hits[k] += 1
             if gt_domain in ranked_domains[:k]:
                 domain_hits[k] += 1
+        save_n = args.save_topk
         results.append({
             "query_idx": q["query_idx"],
             "query": q["query"],
             "domain": gt_domain,
             "gold_tool": gt_name,
             "gold_rank": gold_rank,
-            "top5_tools": ranked_names[:5],
-            "top5_scores": [round(sims[i, j].item(), 4) for j in ranked_idx[:5]],
+            "retrieved_tools": ranked_names[:save_n],
+            "retrieved_scores": [round(sims[i, j].item(), 4) for j in ranked_idx[:save_n]],
         })
 
     n = len(queries)
@@ -123,6 +127,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_length", type=int, default=64)
     p.add_argument("--n_queries", type=int, default=None,
                     help="Subsample for a quick pilot run (default: full 2,146 queries)")
+    p.add_argument("--save_topk", type=int, default=30,
+                    help="How many ranked tools to save per query (for downstream real-retriever "
+                         "pipeline tests, e.g. tier1_oracle.py --retrieved_from)")
     p.add_argument("--output", default=None)
     return p.parse_args()
 

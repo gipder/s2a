@@ -140,6 +140,27 @@ MODEL=model/Qwen3-1.7B ./script/run_eval_zeroshot_retriever.sh
 (1) k를 10~20 정도로 넉넉히 잡거나(domain-only recall@10=91.6%로 훨씬 나음), (2) 8개 tier를 합친
 ~16,843개 라벨 데이터에서 자체 train/dev/test를 만들어 실제로 학습.
 
+### (1)번 확인: k를 넓혀서 진짜 파이프라인을 돌려보면?
+
+`tier1_oracle.py --retrieved_from <retriever json> --retrieved_topk N`으로, oracle(GT 무조건 포함)이
+아니라 zero-shot retriever가 **실제로 고른** top-N을 LLM에 그대로 넣어서 end-to-end 정확도를 쟀다.
+
+```bash
+RETRIEVED_FROM=experiment/zeroshot_retriever/Qwen3-0.6B.json RETRIEVED_TOPK=10 \
+  ./script/run_tier1_oracle.sh
+```
+
+| RETRIEVED_TOPK | retriever exact recall@k | 실제 end-to-end Acc=EM |
+|---|---|---|
+| 10 | 61.9% | 51.8% (1112/2146) |
+| 20 | 72.2% | 58.0% (1244/2146) |
+
+둘 다 152개 전체(64.4%)보다 낮다 — **k를 10~20 정도로 넓히는 것만으로는 90%는커녕 지금 baseline도
+못 넘는다.** recall@k 곡선 자체가 완만해서(recall@50=86.0%, recall@65=90.0%, recall@76=92.3%),
+"실제로 90% 근처"를 찍으려면 k≈65까지 넓혀야 하는데 이건 전체 152개의 43%라 사실상 필터링이라고
+부르기 민망한 수준이다. 결론: 학습 없이 k만 조절하는 접근(옵션 1)으로는 90%에 도달할 수 없고,
+성능을 올리려면 실제 학습(옵션 2, train/dev/test 자체 구성)이 필요함이 정량적으로 확인됨.
+
 ## 재사용
 
 - `src/action_metrics.py` — `noise_aware_slu/src/action_metrics.py`에서 포팅 + 확장. Audio2Tool의
