@@ -523,9 +523,6 @@ domain 오답은 애초에 필터링으로 이미 제거됐으니까).
 
 ## 다음 단계 (미착수)
 
-**프로젝트 contribution의 중심은 retriever의 강점**(baseline 대비 개선 폭)이지, 논문의 절대
-수치를 정확히 재현/설명하는 게 아님 — 아래 항목들의 우선순위도 이 기준으로 정렬.
-
 - [x] synthetic utterance 생성 + leakage filtering (152 tool, 2,911개 확보) — 완료
 - [x] base Qwen3-0.6B에서 1 epoch scratch 학습 — 완료, recall@5 95.9%(oracle 96.9%에 근접),
       real retriever end-to-end Acc=EM 74.6%(152개 전체 64.4%보다 확실히 나음)
@@ -533,11 +530,6 @@ domain 오답은 애초에 필터링으로 이미 제거됐으니까).
 - [x] 프롬프트 업데이트("발화에서 인자 추출" 지시문) 반영해서 Tier-1/Tier-2 8개 세팅(152개 전체/
       domain 필터링/oracle top-5/실제 retriever) 재실행 — 완료. top-1/top-3(Tier-1)은 아직
       이전 프롬프트 결과로 남아있음
-- [x] (보류로 결정) Tier-2 EM/F1이 논문과 다른 이유 규명 — 논문 데모 페이지가 tool_name/
-      extracted_params를 분리해서 출력시키는 것 같다는 가설까지는 나왔지만(JS 렌더링이라 직접
-      확인은 못 함), 우리 pipeline을 native structured tool-calling으로 바꿔서 검증하는 실험은
-      **의도적으로 안 하기로 함** — retriever contribution에 집중하는 게 우선이라 이 축은
-      더 이상 안 팜
 - [ ] Tier-1 전용 프롬프트(인자 추출 지시문 제외)로 재실행해서 60.4%/74.7%(현재)가
       64.4%/80.7%(구버전 프롬프트) 수준으로 회복되는지 확인
 - [ ] recall@5(95.9%)와 downstream Acc(74.0%) 사이 ~22%p 갭 원인 분석 — Tier-2에서는 이 갭의
