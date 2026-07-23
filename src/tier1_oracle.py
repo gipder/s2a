@@ -95,6 +95,23 @@ def sample_topk_candidates(all_tools: list[dict], gt_tool_name: str, k: int, rng
     return candidates
 
 
+def filter_tools_by_domain(all_tools: list[dict], gt_tool_name: str) -> list[dict]:
+    """All tools from the GT tool's own domain -- the middle ground between
+    full-152 and the --topk retriever-shaped upper bound: a realistic
+    "we know the assistant's domain (car/home/wearable), not which specific
+    tool" scenario, same category reasoning_for_asr's Tier4 experiments tested
+    (~53-tool domain-filtered vs 152 all). Domain sizes here are uneven
+    (smart_car=86, smart_home=53, wearables=13 -- see tools_registry.csv), so
+    this isn't a fixed-size cut like --topk, just "not all 3 domains at once".
+
+    Same robustness note as sample_topk_candidates: uses the GT tool's own
+    registered domain, not the item's `domain` field, since those disagree on
+    64/2146 Tier-1 rows (see that function's docstring / README)."""
+    by_name = {t["tool_name"]: t for t in all_tools}
+    real_domain = by_name[gt_tool_name]["domain"]
+    return [t for t in all_tools if t["domain"] == real_domain]
+
+
 def build_user_prompt(query: str, tools_str: str, n_tools: int) -> str:
     return (
         f"Available tools ({n_tools} total), grouped by domain:\n{tools_str}\n\n"
@@ -209,10 +226,17 @@ async def run_async(args: argparse.Namespace) -> None:
     system_prompt = queries[0]["instruction"]
     max_tokens = 1024 if args.enable_thinking else 64
 
+    if args.topk is not None and args.domain_filtered:
+        raise ValueError("--topk and --domain_filtered are mutually exclusive")
+
+    tools_desc = (
+        f"top-{args.topk}" if args.topk
+        else "domain-filtered (~53/86/13 per domain)" if args.domain_filtered
+        else str(len(tools))
+    )
     log.info(
         "Model: %s | Queries: %d | Tools: %s | Thinking: %s | Concurrency: %d",
-        args.model, len(queries), (f"top-{args.topk}" if args.topk else len(tools)),
-        args.enable_thinking, args.concurrency,
+        args.model, len(queries), tools_desc, args.enable_thinking, args.concurrency,
     )
 
     if args.topk is not None:
@@ -224,12 +248,18 @@ async def run_async(args: argparse.Namespace) -> None:
         for q in queries:
             candidates = sample_topk_candidates(tools, q["tool_name"], args.topk, rng)
             prompts.append(build_user_prompt(q["query"], TOOL_FORMATS[args.tool_format](candidates), len(candidates)))
+    elif args.domain_filtered:
+        # Middle ground between full-152 and --topk -- see filter_tools_by_domain docstring.
+        prompts = []
+        for q in queries:
+            candidates = filter_tools_by_domain(tools, q["tool_name"])
+            prompts.append(build_user_prompt(q["query"], TOOL_FORMATS[args.tool_format](candidates), len(candidates)))
     else:
         tools_str = TOOL_FORMATS[args.tool_format](tools)
         prompts = [build_user_prompt(q["query"], tools_str, len(tools)) for q in queries]
 
     semaphore = asyncio.Semaphore(args.concurrency)
-    store_full_prompt = args.topk is not None
+    store_full_prompt = args.topk is not None or args.domain_filtered
 
     async def bounded_query(i: int) -> dict:
         async with semaphore:
@@ -266,6 +296,7 @@ async def run_async(args: argparse.Namespace) -> None:
         "enable_thinking": args.enable_thinking,
         "tool_format": args.tool_format,
         "topk": args.topk,
+        "domain_filtered": args.domain_filtered,
         "system_prompt": system_prompt,  # identical for every sample -- stored once here, not per-sample
         "paper_target_acc": 85.6,
         "summary": {
@@ -282,7 +313,7 @@ async def run_async(args: argparse.Namespace) -> None:
     }
 
     think_tag = "think" if args.enable_thinking else "nothink"
-    topk_tag = f"top{args.topk}" if args.topk else "all152"
+    topk_tag = f"top{args.topk}" if args.topk else "domainfiltered" if args.domain_filtered else "all152"
     out_path = (
         Path(args.output) if args.output
         else BASE_DIR / f"experiment/tier1_oracle/{model_name}_{args.tool_format}_{topk_tag}_{think_tag}.json"
@@ -308,6 +339,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--topk", type=int, default=None,
                     help="Retriever-shaped upper bound: GT + (k-1) same-domain random "
                          "distractors instead of the full 152-tool list (default: full list)")
+    p.add_argument("--domain_filtered", action="store_true",
+                    help="All tools from the GT tool's own domain (~53/86/13 depending on "
+                         "domain) instead of the full 152-tool list. Mutually exclusive with --topk")
     p.add_argument("--seed", type=int, default=42, help="RNG seed for --topk distractor sampling")
     p.add_argument("--output", default=None)
     return p.parse_args()

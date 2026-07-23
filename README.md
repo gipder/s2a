@@ -49,6 +49,9 @@ N_QUERIES=50 ./script/run_tier1_oracle.sh
 # retriever-shaped top-k 실험: GT + 같은 도메인 랜덤 (k-1)개 (진짜 retriever는 아직 없음, 상한선 측정용)
 TOPK=5 ./script/run_tier1_oracle.sh
 
+# domain 필터링: GT의 실제 도메인에 속한 도구 전부 (도메인별 13~86개, 152개 전체와 top-k 사이 중간 지점)
+DOMAIN_FILTERED=1 ./script/run_tier1_oracle.sh
+
 # thinking mode
 ENABLE_THINKING=1 ./script/run_tier1_oracle.sh
 ```
@@ -63,6 +66,7 @@ ENABLE_THINKING=1 ./script/run_tier1_oracle.sh
 | Tool 후보 개수 | Acc = EM | 비고 |
 |---|---|---|
 | 152개 전체 | 64.4% (1383/2146) | 논문 목표 85.6%에 -21.2%p |
+| domain 필터링 (GT의 실제 도메인 전부, 13~86개) | 78.6% (1686/2146) | 152개 전체와 top-5 사이 |
 | top-5 (GT + 같은 도메인 랜덤 4개) | 96.9% (2080/2146) | |
 | top-3 | 98.1% (2105/2146) | |
 | top-1 (GT만) | 98.5% (2114/2146) | 하니스 자체의 상한선 (파싱/포맷 신뢰도 체크) |
@@ -71,6 +75,20 @@ ENABLE_THINKING=1 ./script/run_tier1_oracle.sh
 큰 성능 요인")이 Tier1에서도 재확인됨 — top-5는 무작위 distractor인데도 논문 목표를 이미 넘어섬.
 STOP에서는 domain 필터링만으론 성능이 안 올랐던 것과 대조적이라, 이 프로젝트의 retriever 연구
 방향에 좋은 신호.
+
+domain 필터링 결과를 도메인별로 쪼개보면 (도구 수: smart_car 86 / smart_home 53 / wearables 13):
+
+| 도메인 | Acc |
+|---|---|
+| wearables | 97.2% |
+| smart_car | 86.1% |
+| smart_home | 73.2% |
+
+smart_home이 smart_car보다 도구 수가 적은데도(53 vs 86) 정확도가 더 낮음 — domain 필터링은
+cross-domain 혼동(52.4%의 오답 원인)은 없애주지만, smart_home 내부의 근사-동의어 중복
+(`setLighting`/`setLightState` 등, 오답의 45.5%)은 여전히 남기 때문. 즉 이 갭을 마저 메우려면
+domain을 넘어 실제 tool 단위로 후보를 좁히는 retriever가 필요하다는 뜻 — top-5 결과(96.9%)가
+그 상한선을 보여줌.
 
 ### 발견한 taxonomy(DB) 버그
 

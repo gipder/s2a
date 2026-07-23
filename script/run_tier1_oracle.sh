@@ -2,9 +2,11 @@
 # Audio2Tool Tier-1 oracle reproduction (paper Table 3 "Qwen 8B" row, target Acc=EM=85.6%).
 #
 # Usage:
-#   ./script/run_tier1_oracle.sh              # full 2,146-query run
-#   N_QUERIES=50 ./script/run_tier1_oracle.sh  # quick pilot
+#   ./script/run_tier1_oracle.sh                    # full 2,146-query run, all 152 tools
+#   N_QUERIES=50 ./script/run_tier1_oracle.sh        # quick pilot
 #   ENABLE_THINKING=1 ./script/run_tier1_oracle.sh
+#   TOPK=5 ./script/run_tier1_oracle.sh              # retriever-shaped upper bound
+#   DOMAIN_FILTERED=1 ./script/run_tier1_oracle.sh   # all tools from GT's own domain (~53/86/13)
 
 set -euo pipefail
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,6 +26,7 @@ THINK_FLAG=""
 CMD=(python "$BASE_DIR/src/tier1_oracle.py" --model "$MODEL" --tool_format "$TOOL_FORMAT")
 [[ -n "$N_QUERIES" ]] && CMD+=(--n_queries "$N_QUERIES")
 [[ -n "$TOPK" ]] && CMD+=(--topk "$TOPK")
+[[ "${DOMAIN_FILTERED:-0}" == "1" ]] && CMD+=(--domain_filtered)
 [[ -n "$THINK_FLAG" ]] && CMD+=("$THINK_FLAG")
 
 "$BASE_DIR/script/run_with_vllm.sh" -m "$MODEL" -g "$GPUS" -t "$TP_SIZE" -- "${CMD[@]}"
