@@ -9,6 +9,8 @@
 #   DOMAIN_FILTERED=1 ./script/run_tier1_oracle.sh   # all tools from GT's own domain (~53/86/13)
 #   RETRIEVED_FROM=experiment/zeroshot_retriever/Qwen3-0.6B.json RETRIEVED_TOPK=10 \
 #     ./script/run_tier1_oracle.sh                   # REAL retriever candidates, GT not guaranteed
+#   RETRIEVED_DOMAIN_FROM=experiment/zeroshot_retriever/Qwen3-0.6B.json \
+#     ./script/run_tier1_oracle.sh                   # domain PREDICTED via retriever top-1 (non-oracle domain_filtered)
 
 set -euo pipefail
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,6 +26,8 @@ TOOL_FORMAT="${TOOL_FORMAT:-domain}"
 TOPK="${TOPK:-}"
 RETRIEVED_FROM="${RETRIEVED_FROM:-}"
 RETRIEVED_TOPK="${RETRIEVED_TOPK:-10}"
+RETRIEVED_DOMAIN_FROM="${RETRIEVED_DOMAIN_FROM:-}"
+OUTPUT="${OUTPUT:-}"
 THINK_FLAG=""
 [[ "${ENABLE_THINKING:-0}" == "1" ]] && THINK_FLAG="--enable_thinking"
 
@@ -32,6 +36,8 @@ CMD=(python "$BASE_DIR/src/tier1_oracle.py" --model "$MODEL" --tool_format "$TOO
 [[ -n "$TOPK" ]] && CMD+=(--topk "$TOPK")
 [[ "${DOMAIN_FILTERED:-0}" == "1" ]] && CMD+=(--domain_filtered)
 [[ -n "$RETRIEVED_FROM" ]] && CMD+=(--retrieved_from "$RETRIEVED_FROM" --retrieved_topk "$RETRIEVED_TOPK")
+[[ -n "$RETRIEVED_DOMAIN_FROM" ]] && CMD+=(--retrieved_domain_from "$RETRIEVED_DOMAIN_FROM")
+[[ -n "$OUTPUT" ]] && CMD+=(--output "$OUTPUT")
 [[ -n "$THINK_FLAG" ]] && CMD+=("$THINK_FLAG")
 
 "$BASE_DIR/script/run_with_vllm.sh" -m "$MODEL" -g "$GPUS" -t "$TP_SIZE" -- "${CMD[@]}"

@@ -37,7 +37,6 @@ from action_metrics import (
     extract_tool_name,
     parse_canonical_action,
     slot_f1,
-    tool_acc,
 )
 from oracle_shared import add_candidate_selection_args, build_candidate_prompts, load_unique_queries, shorten_prompt
 from tools_registry import load_tools
@@ -50,22 +49,36 @@ DATA_PATH = BASE_DIR / "data/Audio2Tool_mod/public/tier2_parametric_data/tier2_p
 TOOLS_CSV = BASE_DIR / "data/Audio2Tool_mod/tools_registry.csv"
 
 
-def score(pred_call: str | None, ref_tree: dict) -> tuple[bool, bool, float]:
-    """Returns (tool_acc, em, slot_f1) against an already-parsed gold tree
-    (see run_async -- unlike Tier-1, 2/2,041 unique Tier-2 gold strings are
-    themselves malformed dataset bugs, e.g. an unescaped apostrophe or a
-    stray non-ASCII character mid-identifier, so parsing gold happens once
-    up front with those rows dropped, not per-query here). pred_call may
-    still fail to parse (malformed/hallucinated model output), which --
-    matching compute_action_metrics' convention -- scores 0 on every metric
-    rather than raising."""
+def score(pred_call: str | None, ref_tree: dict) -> tuple[bool, bool, float, bool]:
+    """Returns (tool_acc, em, slot_f1, full_parse_ok) against an
+    already-parsed gold tree (see run_async -- unlike Tier-1, 2/2,041 unique
+    Tier-2 gold strings are themselves malformed dataset bugs, e.g. an
+    unescaped apostrophe or a stray non-ASCII character mid-identifier, so
+    parsing gold happens once up front with those rows dropped, not per-query
+    here).
+
+    Tool-Acc is graded via extract_tool_name's lenient regex extraction, NOT
+    a full parse_canonical_action -- same reasoning as tier1_oracle.py/that
+    function's docstring: a malformed or hallucinated argument (e.g. a
+    dangling comma, an unquoted string) shouldn't zero out an otherwise
+    correct tool-name prediction. Requiring a clean full parse for Acc too
+    was tier2_oracle.py's own bug, not something compute_action_metrics'
+    convention calls for -- that convention is specifically about EM/F1,
+    which genuinely can't be scored without a structured argument tree.
+    full_parse_ok tells the caller whether pred_call was well-formed enough
+    for EM/F1 to mean anything (used for an accurate parse_failures count --
+    counting only `pred_call is None` misses "extracted a call, but its
+    arguments didn't parse")."""
     if not pred_call:
-        return False, False, 0.0
+        return False, False, 0.0, False
+    pred_tool_name = extract_tool_name(pred_call)
+    ref_tool_name = ref_tree.get("intent")
+    acc = bool(pred_tool_name and ref_tool_name and pred_tool_name.upper() == ref_tool_name.upper())
     try:
         pred_tree = parse_canonical_action(pred_call)
     except ActionParseError:
-        return False, False, 0.0
-    return bool(tool_acc(pred_tree, ref_tree)), bool(em(pred_tree, ref_tree)), slot_f1(pred_tree, ref_tree)
+        return acc, False, 0.0, False
+    return acc, bool(em(pred_tree, ref_tree)), slot_f1(pred_tree, ref_tree), True
 
 
 async def query_one(
@@ -94,7 +107,7 @@ async def query_one(
 
     pred_call = extract_action_call(output)
     pred_tool = extract_tool_name(pred_call) if pred_call else None
-    acc, em_score, f1 = score(pred_call, sample["_ref_tree"])
+    acc, em_score, f1, full_parse_ok = score(pred_call, sample["_ref_tree"])
 
     log.info(
         "[%d/%d] [acc=%s em=%s f1=%.2f] expected=%s | predicted=%s",
@@ -110,6 +123,7 @@ async def query_one(
         "raw_output": output,
         "predicted_call": pred_call,
         "predicted_tool": pred_tool,
+        "full_parse_ok": full_parse_ok,
         "tool_acc": acc,
         "em": em_score,
         "slot_f1": f1,
@@ -173,7 +187,11 @@ async def run_async(args: argparse.Namespace) -> None:
     acc_count = sum(r["tool_acc"] for r in results)
     em_count = sum(r["em"] for r in results)
     avg_f1 = sum(r["slot_f1"] for r in results) / n
-    parse_failures = sum(1 for r in results if r["predicted_call"] is None)
+    # Not just `predicted_call is None` -- that only catches extract_action_call
+    # finding nothing at all. A call can be extracted but still fail the full
+    # parse_canonical_action (e.g. malformed argument syntax), which counts as
+    # a parse failure for EM/F1 purposes too (see score()'s full_parse_ok).
+    parse_failures = sum(1 for r in results if not r["full_parse_ok"])
 
     log.info(
         "Tier-2 oracle | Acc: %d/%d = %.1f%%  EM: %d/%d = %.1f%%  F1: %.1f%%  "
@@ -192,6 +210,7 @@ async def run_async(args: argparse.Namespace) -> None:
         "domain_filtered": args.domain_filtered,
         "retrieved_from": args.retrieved_from,
         "retrieved_topk": args.retrieved_topk if args.retrieved_from else None,
+        "retrieved_domain_from": args.retrieved_domain_from,
         "system_prompt": system_prompt,
         "dropped_unparseable_gold": bad_gold,
         "paper_target": {"acc": 77.1, "em": 10.1, "f1": 19.3},
@@ -211,6 +230,7 @@ async def run_async(args: argparse.Namespace) -> None:
         f"top{args.topk}" if args.topk
         else "domainfiltered" if args.domain_filtered
         else f"retrieved{args.retrieved_topk}-{Path(args.retrieved_from).stem}" if args.retrieved_from
+        else f"reddomain-{Path(args.retrieved_domain_from).stem}" if args.retrieved_domain_from
         else "all152"
     )
     out_path = (

@@ -187,6 +187,7 @@ async def run_async(args: argparse.Namespace) -> None:
         "domain_filtered": args.domain_filtered,
         "retrieved_from": args.retrieved_from,
         "retrieved_topk": args.retrieved_topk if args.retrieved_from else None,
+        "retrieved_domain_from": args.retrieved_domain_from,
         "system_prompt": system_prompt,  # identical for every sample -- stored once here, not per-sample
         "paper_target_acc": 85.6,
         "summary": {
@@ -212,6 +213,7 @@ async def run_async(args: argparse.Namespace) -> None:
         # and silently overwrite each other, with no way to tell from the
         # filename which retriever produced a given result.
         else f"retrieved{args.retrieved_topk}-{Path(args.retrieved_from).stem}" if args.retrieved_from
+        else f"reddomain-{Path(args.retrieved_domain_from).stem}" if args.retrieved_domain_from
         else "all152"
     )
     out_path = (
