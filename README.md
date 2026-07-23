@@ -420,9 +420,15 @@ retriever 단계에서도 그대로 나타남.
 | 세팅 | Tier1 Acc=EM | Tier2 Acc | Tier2 EM | Tier2 F1 |
 |---|---|---|---|---|
 | 152개 전체 | 60.4% | 69.3% | 43.8% | 62.5% |
-| domain 필터링 (oracle, 진짜 domain) | 77.2% | 83.1% | 50.6% | 69.0% |
-| **domain 예측 필터링 (retriever)** | **69.5%** | **73.7%** | **45.3%** | **62.6%** |
 | top-1 (retriever 최선 추측 하나만) | 71.1% | 68.2% | 44.7% | 58.1% |
+| domain 예측 필터링 (retriever) | 69.5% | 73.7% | 45.3% | 62.6% |
+| **top-5 (실제 retriever)** | **74.0%** | **78.3%** | **48.7%** | **64.9%** |
+| domain 필터링 (oracle, 진짜 domain) | 77.2% | 83.1% | 50.6% | 69.0% |
+
+두 tier 다 순위는 **152개 전체 < top-1 < domain 예측 필터링 < top-5(실제 retriever) < domain
+필터링(oracle)** — top-5가 domain 예측 필터링보다 후보 수는 훨씬 적은데(5개 vs 13~86개)도 더 나은
+이유는, retriever의 recall@5(Tier1 95.9%/Tier2 93.0%)가 domain 예측 정확도(88.9%/88.8%)보다
+높아서 "정답이 후보 안에 있을 확률" 자체가 더 크기 때문.
 
 **domain 예측 필터링은 152개 전체와 oracle domain 필터링 사이**에 정확히 위치 — 예상대로.
 retriever의 domain 예측이 88.9%/88.8%로 완벽하지 않은 만큼 oracle(100% 정확한 domain)보다는
@@ -437,8 +443,11 @@ retriever의 domain 예측이 88.9%/88.8%로 완벽하지 않은 만큼 oracle(1
   하나뿐이라 대안이 없어서). domain 필터링은 최소 13개 이상의 대안이 있어서 이 거부 패턴이 훨씬 덜함.
 
 결론: **domain을 모른다는 현실적 가정 하에서는, retriever로 domain만 예측해서 필터링하는 게
-top-1(정확한 tool 하나만 찍기)보다 Tier2(인자 있는 태스크)에서 더 안전하고 나은 선택.** Tier1처럼
-인자가 없는 태스크에서는 top-1도 나쁘지 않음.
+top-1(정확한 tool 하나만 찍기)보다 Tier2(인자 있는 태스크)에서 더 안전하고 나은 선택.** 다만 이미
+학습해둔 retriever가 recall@5도 충분히 좋다면(여기 케이스처럼), top-5 그대로 쓰는 게 domain
+예측보다도 나음 — domain 예측 필터링은 retriever의 recall이 낮거나 domain 예측 자체가 더 쉬운
+상황(예: domain 수가 훨씬 많아서 정확한 tool보다 domain 맞히기가 상대적으로 쉬워지는 경우)에서
+더 유리할 걸로 예상.
 
 ## 재사용
 
