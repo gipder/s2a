@@ -280,6 +280,52 @@ RETRIEVED_FROM=experiment/zeroshot_retriever/Qwen3-0.6B_lora-retriever_train-scr
 LLM 입장에서 더 헷갈리는 선택지일 가능성이 있음(같은 domain 내 근사-동의어 쌍이 retriever
 top-5에 몰려 있을 수 있음). 정확한 원인 분석은 다음 단계.
 
+## Tier-2 (Parametric) 확장
+
+Tier-1과 같은 4가지 세팅(152개 전체 / domain 필터링 / 실제 retriever @k=5 / oracle top-5)을
+Tier-2에도 그대로 적용. `src/tier2_oracle.py`가 `tier1_oracle.py`의 후보 선택 로직(topk/
+domain_filtered/retrieved_from — 전부 tier에 무관한 범용 코드)을 그대로 재사용하되, 채점은
+Tier-2부터 진짜로 인자까지 보는 `action_metrics.em()`/`slot_f1()`을 씀(Tier-1의 name-only 방식과
+다름, 위 "Tier별 채점 정책" 참고).
+
+```bash
+./script/run_tier2_oracle.sh                      # 152개 전체
+DOMAIN_FILTERED=1 ./script/run_tier2_oracle.sh
+TOPK=5 ./script/run_tier2_oracle.sh
+RETRIEVED_FROM=experiment/zeroshot_retriever/Qwen3-0.6B_lora-retriever_train-scratch_1ep_tier2.json \
+  RETRIEVED_TOPK=5 ./script/run_tier2_oracle.sh
+```
+
+retriever는 Tier-1용으로 학습한 것을 그대로 재사용(코퍼스가 152개 tool로 tier 무관하게 동일) —
+`eval_zeroshot_retriever.py --tier tier2`로 Tier-2 쿼리에 대해서만 다시 검색만 수행:
+recall@5 93.0%(Tier-1은 95.9%, Tier-2 발화가 인자값을 포함해서 조금 더 어려움).
+
+### 파서 확장 필요했음
+
+Tier-2 gold는 실제 인자값을 담고 있어서 `action_metrics.py`가 처음엔 2,041개 중 10개를 파싱
+실패했음 — 따옴표 없는 숫자(`speed=7`), 따옴표 없는 bool(`enabled=true`), SQL식 이중 홑따옴표
+이스케이프(`'kids'' room'`, 기존 백슬래시 방식과 별개) 세 가지를 추가 지원해서 8개는 해결. 남은
+2개는 파서가 아니라 **진짜 데이터 버그**: `getAppప్lianceState`(텔루구 문자가 tool 이름 중간에
+섞여 들어감), `setDestination(address='Trader Joe's')`(이스케이프 안 된 아포스트로피로 원천적으로
+모호함). 이 둘은 크래시 대신 경고 로그 남기고 채점에서 제외하도록 처리.
+
+### 결과 (2026-07-23, n=3,158, no-thinking, greedy)
+
+| 세팅 | Acc | EM | F1 |
+|---|---|---|---|
+| 152개 전체 | 73.4% | 44.8% | 63.2% |
+| domain 필터링 | 83.8% | 48.2% | 65.3% |
+| 실제 retriever @k=5 (1 epoch 학습) | 78.9% | 38.8% | 57.6% |
+| oracle top-5 (GT 보장) | 98.0% | 51.4% | 67.1% |
+| **논문 목표 (Qwen 8B)** | **77.1%** | **10.1%** | **19.3%** |
+
+Acc는 4개 세팅 다 논문 목표(77.1%)와 비슷한 범위인데, **EM과 F1은 전부 논문보다 훨씬 높음**(EM
+38.8~51.4% vs 목표 10.1%, F1 57.6~67.1% vs 목표 19.3%) — 4~5배 차이라 우연한 오차라고 보기
+어려움. Tier-1에서 겪었던 "채점 기준 자체가 다르다"는 패턴이 여기서도 반복될 가능성이 있음(예:
+논문이 device ID 같은 slot 값을 더 엄격하게 비교하거나, 우리 쪽 `_normalize_text`의 대소문자/공백
+무시가 너무 관대하거나). 원인 파악 전까지 이 Tier-2 EM/F1 수치는 우리 자체 채점 기준으로 해석해야
+하고, 논문과의 직접 비교는 보류.
+
 ## 재사용
 
 - `src/action_metrics.py` — `noise_aware_slu/src/action_metrics.py`에서 포팅 + 확장. Audio2Tool의
@@ -292,18 +338,17 @@ top-5에 몰려 있을 수 있음). 정확한 원인 분석은 다음 단계.
 
 ## 다음 단계 (미착수)
 
-- [ ] Whisper-large-v3 cascade 붙이기 (`whisperv3 + Qwen 8B`, 78.1% 목표)
-- [ ] tools_registry.csv의 도메인 라벨 버그(64건) 수정
-- [ ] Tier-2 이상으로 확장 (이때부터 `action_metrics.em()`으로 진짜 인자까지 채점)
 - [x] synthetic utterance 생성 + leakage filtering (152 tool, 2,911개 확보) — 완료
 - [x] base Qwen3-0.6B에서 1 epoch scratch 학습 — 완료, recall@5 95.9%(oracle 96.9%에 근접),
       real retriever end-to-end Acc=EM 74.6%(152개 전체 64.4%보다 확실히 나음)
+- [x] Tier-2로 확장 (152개 전체/domain 필터링/실제 retriever/oracle top-5 전부) — 완료
+- [ ] Tier-2 EM/F1이 논문 목표보다 4~5배 높게 나오는 원인 파악 (Acc는 비슷한 범위) — 채점 기준
+      자체가 다를 가능성(예: slot 값 정규화 관대함), Tier-1의 "채점 정책 오해" 패턴 재확인 필요
 - [ ] recall@5(95.9%)와 downstream Acc(74.6%) 사이 ~21%p 갭 원인 분석 — 학습된 retriever의 top-5가
       진짜 near-neighbor라 oracle의 무작위 distractor보다 LLM 입장에서 더 헷갈릴 가능성 검증
 - [ ] STOP 체크포인트(`qwen3-0.6b_depth0.1_seed44_5ep/epoch5`)에서 warm-start한 버전과 scratch
       1epoch 버전 비교, epoch 수 늘려서 추가 개선 여지 확인
 - [ ] tools_registry.csv의 도메인 라벨 버그(64건) 수정
-- [ ] Tier-2 이상으로 확장 (이때부터 `action_metrics.em()`으로 진짜 인자까지 채점)
 - [ ] Whisper-large-v3 cascade 붙이기 (`whisperv3 + Qwen 8B`, 78.1% 목표)
 - [ ] (검토 중) domain 하나씩 빼고 학습해서 unseen domain 일반화 능력 별도 측정
 - [ ] 8개 tier(~16,843개 라벨) 실 utterance도 train/dev/test로 나눠서 synthetic 데이터와 비교 —
