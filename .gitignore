@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific: large artifacts kept out of git
+model
+model/
+data
+data/
+experiment/
