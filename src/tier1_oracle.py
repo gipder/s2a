@@ -117,7 +117,9 @@ def build_user_prompt(query: str, tools_str: str, n_tools: int) -> str:
         f"Available tools ({n_tools} total), grouped by domain:\n{tools_str}\n\n"
         f'User utterance: "{query}"\n\n'
         f"Respond with a single tool call in the form tool_name(arg=\"value\", ...), "
-        f"or tool_name() if it takes no arguments.\n\n"
+        f"or tool_name() if it takes no arguments. Extract every argument value from "
+        f"the user utterance itself -- do not copy the \"defaults\" shown above, and do "
+        f"not omit an argument the utterance specifies a value for.\n\n"
         f"Tool call:"
     )
 
