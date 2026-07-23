@@ -26,7 +26,16 @@ def load_tools(csv_path: Path) -> List[Tool]:
 def format_tools_by_domain(tools: List[Tool]) -> str:
     """Full tool list grouped by domain, one line per tool: signature +
     description + defaults/constraints. Matches the format used for the
-    paper's main-table ASR-LLM baseline (no domain/retriever filtering)."""
+    paper's main-table ASR-LLM baseline (no domain/retriever filtering).
+
+    Renders argument_defaults/argument_constraints in the registry's own
+    "key='value'" kwarg syntax. An earlier version rewrote this as "key: value"
+    prose, hypothesizing the model was visually copy-pasting the kwarg syntax
+    into calls the query never asked for arguments in -- that turned out to be
+    a non-issue (Tier-1 grading only checks the tool name; see tier1_oracle.py
+    query_one), and the prose version measurably hurt Tool-Acc (the defaults
+    text is genuinely useful for disambiguating near-synonym tools), so this
+    reverts to the original kwarg rendering."""
     by_domain: dict[str, list] = defaultdict(list)
     for t in tools:
         by_domain[t["domain"]].append(t)

@@ -9,6 +9,16 @@ Target: Tier-1 Acc = EM = 85.6%.
 Text-only: feeds the ground-truth `query` string (not audio) to the LLM served
 via vLLM's OpenAI-compatible API, alongside the full 152-tool taxonomy.
 
+Grading policy is tier-specific, confirmed against the worked examples at
+https://audio2tool.github.io/: Tier-1's ground truth is shown as a bare
+"Tool: setZoneTemperature" (no argument notation), while Tier-2+ ground truth
+shows "Tool: X: {args...}" -- arguments only enter grading from Tier-2 onward.
+So here, EM is tool-name match only, same as Tool-Acc (see query_one) --
+`expected_tool_call`'s trailing "()" is call-syntax formatting, not "must
+match zero args". This does NOT generalize to later tiers: a future
+tier2_oracle.py etc. must grade EM with action_metrics.em() (full
+name+argument tree match) instead of reusing this file's name-only logic.
+
 Usage:
     # Start the server separately, or use script/run_with_vllm.sh which wraps this.
     #   CUDA_VISIBLE_DEVICES=0 vllm serve model/Qwen3-8B --port 8000 --max-model-len 8192
@@ -30,7 +40,7 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
-from action_metrics import extract_action_call, extract_tool_name
+from action_metrics import ActionParseError, extract_action_call, extract_tool_name, parse_canonical_action
 from tools_registry import format_tools_by_domain, format_tools_by_domain_category, load_tools
 
 TOOL_FORMATS = {
@@ -112,6 +122,18 @@ def shorten_prompt(prompt: str) -> str:
     )
 
 
+def model_included_args(pred_call: str | None) -> bool:
+    """Whether the model's predicted call carries any arguments at all --
+    purely diagnostic (see query_one), not part of Tier-1 grading."""
+    if not pred_call:
+        return False
+    try:
+        pred_tree = parse_canonical_action(pred_call)
+    except ActionParseError:
+        return False
+    return bool(pred_tree["slots"])
+
+
 async def query_one(
     client: AsyncOpenAI,
     model: str,
@@ -141,11 +163,24 @@ async def query_one(
     pred_tool = extract_tool_name(pred_call) if pred_call else None
     ref_tool = extract_tool_name(sample["expected_tool_call"])
     correct = bool(pred_tool and ref_tool and pred_tool.upper() == ref_tool.upper())
+    # Tier-1's EM == Tool-Acc by the benchmark's own definition, confirmed
+    # against https://audio2tool.github.io/'s worked examples: Tier-1 ground
+    # truth is shown as bare "Tool: setZoneTemperature" (no argument notation
+    # at all), while Tier-2+ ground truth shows "Tool: X: {args...}" -- i.e.
+    # arguments only enter grading from Tier-2 onward. `expected_tool_call`'s
+    # trailing "()" is just call-syntax formatting, not "must have zero args"
+    # (this also explains why Table 3 has Acc==EM for every single model on
+    # Tier-1: that identity is only possible if EM there ignores arguments).
+    # Whether the model tacks on an argument anyway is tracked separately
+    # below purely as a behavioral diagnostic, not an error.
+    em_score = correct
+    included_args = model_included_args(pred_call)
 
     log.info(
-        "[%d/%d] [%s] expected=%s | predicted=%s",
+        "[%d/%d] [%s] expected=%s | predicted=%s%s",
         idx + 1, total, "O" if correct else "X",
         sample["tool_name"], pred_tool or "<none>",
+        " (+unrequested args)" if correct and included_args else "",
     )
     return {
         "query_idx": sample["query_idx"],
@@ -157,6 +192,8 @@ async def query_one(
         "predicted_call": pred_call,
         "predicted_tool": pred_tool,
         "correct": correct,
+        "em": em_score,
+        "included_args": included_args,
     }
 
 
@@ -208,12 +245,18 @@ async def run_async(args: argparse.Namespace) -> None:
     results = sorted(results, key=lambda r: r["query_idx"])
     correct_count = sum(r["correct"] for r in results)
     accuracy = correct_count / len(results) * 100
+    em_count = sum(r["em"] for r in results)  # == correct_count on Tier-1, see query_one
+    em_accuracy = em_count / len(results) * 100
     parse_failures = sum(1 for r in results if r["predicted_call"] is None)
+    # Purely behavioral diagnostic, not an error: how often the model attaches
+    # an argument to a correct call even though the gold call has none.
+    unrequested_args = sum(1 for r in results if r["correct"] and r["included_args"])
 
     log.info(
         "Tier-1 oracle | Acc=EM: %d/%d = %.1f%%  (paper target: 85.6%%)  |  "
-        "parse failures: %d  |  elapsed: %.1fs",
-        correct_count, len(results), accuracy, parse_failures, elapsed,
+        "correct calls with unrequested args: %d  |  parse failures: %d  |  elapsed: %.1fs",
+        correct_count, len(results), accuracy,
+        unrequested_args, parse_failures, elapsed,
     )
 
     model_name = Path(args.model).name
@@ -229,6 +272,9 @@ async def run_async(args: argparse.Namespace) -> None:
             "correct": correct_count,
             "total": len(results),
             "accuracy": accuracy,
+            "em_correct": em_count,
+            "em_accuracy": em_accuracy,
+            "unrequested_args": unrequested_args,
             "parse_failures": parse_failures,
             "elapsed_sec": round(elapsed, 1),
         },

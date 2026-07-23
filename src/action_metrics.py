@@ -6,6 +6,16 @@ the canonical action grammar used there, `INTENT(SLOT="value", ...)`, is exactly
 the grammar Audio2Tool's `expected_tool_call` field already uses (e.g.
 `setZoneTemperature(zone="Driver", temperature=22.0)`), so the parser/scorer needs
 no changes -- only the callers (data loading, prompt building) differ per project.
+
+Audio2Tool's own grading policy is tier-specific though (confirmed against
+https://audio2tool.github.io/'s worked examples): Tier-1 ground truth is
+argument-free by design ("Tool: setZoneTemperature", no args shown at all),
+so its EM is tool-name match only and tier1_oracle.py does NOT use em() below
+for that reason -- see its module docstring. Tier-2 onward *does* grade
+arguments ("Tool: X: {args...}"), which is what tool_acc()/em()/slot_f1()
+here are for. Callers for those tiers should use em() as the real Exact
+Match, not roll their own name-only check the way tier1_oracle.py correctly
+does for Tier-1 specifically.
 """
 from __future__ import annotations
 
@@ -47,13 +57,38 @@ def parse_canonical_action(text: str) -> Dict[str, Any]:
         return m.group(0), m.end()
 
     def parse_string(p: int) -> Tuple[str, int]:
-        try:
-            value, end = json.JSONDecoder().raw_decode(s, p)
-        except json.JSONDecodeError as e:
-            raise ActionParseError(f"bad quoted string at {p}: {e}") from e
-        if not isinstance(value, str):
-            raise ActionParseError(f"expected string literal at {p}")
-        return value, end
+        # Double-quoted: standard JSON string (used in this project's own
+        # prompts, e.g. tier1_oracle's `tool_name(arg="value")` instruction).
+        if s[p] == '"':
+            try:
+                value, end = json.JSONDecoder().raw_decode(s, p)
+            except json.JSONDecodeError as e:
+                raise ActionParseError(f"bad quoted string at {p}: {e}") from e
+            if not isinstance(value, str):
+                raise ActionParseError(f"expected string literal at {p}")
+            return value, end
+        # Single-quoted: Audio2Tool's own expected_tool_call gold strings use
+        # this for the 13/2146 Tier-1 rows (and presumably more on other
+        # tiers) that carry a non-empty argument, e.g.
+        # getApplianceState(deviceId='dryer_1') -- Python-repr style, not
+        # JSON, so decode it by hand (backslash-escapes the quote or backslash
+        # itself, nothing fancier -- this taxonomy's string values are plain
+        # device ids/enum labels, never containing embedded newlines etc.).
+        assert s[p] == "'"
+        chars: List[str] = []
+        i = p + 1
+        while True:
+            if i >= len(s):
+                raise ActionParseError(f"unterminated single-quoted string at {p}")
+            ch = s[i]
+            if ch == "\\" and i + 1 < len(s) and s[i + 1] in ("'", "\\"):
+                chars.append(s[i + 1])
+                i += 2
+                continue
+            if ch == "'":
+                return "".join(chars), i + 1
+            chars.append(ch)
+            i += 1
 
     def parse_call_body(name: str, p: int) -> Tuple[Dict[str, Any], int]:
         assert s[p] == "("
@@ -86,7 +121,7 @@ def parse_canonical_action(text: str) -> Dict[str, Any]:
 
     def parse_value(p: int) -> Tuple[Any, int]:
         p = skip_ws(p)
-        if p < len(s) and s[p] == '"':
+        if p < len(s) and s[p] in ("'", '"'):
             return parse_string(p)
         if p < len(s) and s[p] == "[":
             items: List[Any] = []
