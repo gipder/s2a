@@ -45,7 +45,7 @@ from peft import PeftModel
 from transformers import AutoModel, AutoTokenizer
 
 from embedding_utils import encode_texts
-from tier1_oracle import load_unique_queries
+from oracle_shared import load_unique_queries
 from tools_registry import load_tools
 
 BASE_DIR = Path(__file__).resolve().parent.parent

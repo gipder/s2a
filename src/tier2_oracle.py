@@ -12,10 +12,8 @@ action_metrics.parse_canonical_action + em() full name+argument-tree match,
 not the name-only shortcut tier1_oracle.py correctly uses for Tier-1 only.
 
 Candidate-selection modes (--topk / --domain_filtered / --retrieved_from) and
-prompt building are unchanged from Tier-1 -- imported directly from
-tier1_oracle.py rather than duplicated, since none of that logic is
-Tier-1-specific (see that module for the domain-label-mismatch robustness
-notes on sample_topk_candidates/filter_tools_by_domain).
+prompt building are tier-agnostic and live in oracle_shared.py, shared with
+tier1_oracle.py -- only the grading here (score/query_one) is Tier-2-specific.
 
 Usage:
     python src/tier2_oracle.py --model model/Qwen3-8B
@@ -27,7 +25,6 @@ import argparse
 import asyncio
 import json
 import logging
-import random
 import time
 from pathlib import Path
 
@@ -42,14 +39,7 @@ from action_metrics import (
     slot_f1,
     tool_acc,
 )
-from tier1_oracle import (
-    TOOL_FORMATS,
-    build_user_prompt,
-    filter_tools_by_domain,
-    load_unique_queries,
-    sample_topk_candidates,
-    shorten_prompt,
-)
+from oracle_shared import add_candidate_selection_args, build_candidate_prompts, load_unique_queries, shorten_prompt
 from tools_registry import load_tools
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -62,13 +52,13 @@ TOOLS_CSV = BASE_DIR / "data/Audio2Tool_mod/tools_registry.csv"
 
 def score(pred_call: str | None, ref_tree: dict) -> tuple[bool, bool, float]:
     """Returns (tool_acc, em, slot_f1) against an already-parsed gold tree
-    (see filter_unparseable_gold -- unlike Tier-1, 2/2,041 unique Tier-2 gold
-    strings are themselves malformed dataset bugs, e.g. an unescaped
-    apostrophe or a stray non-ASCII character mid-identifier, so parsing gold
-    happens once up front with those rows dropped, not per-query here).
-    pred_call may still fail to parse (malformed/hallucinated model output),
-    which -- matching compute_action_metrics' convention -- scores 0 on every
-    metric rather than raising."""
+    (see run_async -- unlike Tier-1, 2/2,041 unique Tier-2 gold strings are
+    themselves malformed dataset bugs, e.g. an unescaped apostrophe or a
+    stray non-ASCII character mid-identifier, so parsing gold happens once
+    up front with those rows dropped, not per-query here). pred_call may
+    still fail to parse (malformed/hallucinated model output), which --
+    matching compute_action_metrics' convention -- scores 0 on every metric
+    rather than raising."""
     if not pred_call:
         return False, False, 0.0
     try:
@@ -159,80 +149,13 @@ async def run_async(args: argparse.Namespace) -> None:
     system_prompt = queries[0]["instruction"]
     max_tokens = 1024 if args.enable_thinking else 64
 
-    if sum(x is not None for x in [args.topk, args.retrieved_from]) + int(args.domain_filtered) > 1:
-        raise ValueError("--topk, --domain_filtered, --retrieved_from are mutually exclusive")
-
-    tools_desc = (
-        f"top-{args.topk} (oracle: GT+random distractors)" if args.topk
-        else "domain-filtered (~53/86/13 per domain)" if args.domain_filtered
-        else f"top-{args.retrieved_topk} (REAL retriever, no GT guarantee)" if args.retrieved_from
-        else str(len(tools))
-    )
+    prompts, store_full_prompt, tools_desc = build_candidate_prompts(args, tools, queries, TOOLS_CSV)
     log.info(
         "Model: %s | Queries: %d | Tools: %s | Thinking: %s | Concurrency: %d",
         args.model, len(queries), tools_desc, args.enable_thinking, args.concurrency,
     )
 
-    if args.topk is not None:
-        rng = random.Random(args.seed)
-        prompts = []
-        for q in queries:
-            candidates = sample_topk_candidates(tools, q["tool_name"], args.topk, rng)
-            prompts.append(build_user_prompt(q["query"], TOOL_FORMATS[args.tool_format](candidates), len(candidates)))
-    elif args.domain_filtered:
-        prompts = []
-        for q in queries:
-            candidates = filter_tools_by_domain(tools, q["tool_name"])
-            prompts.append(build_user_prompt(q["query"], TOOL_FORMATS[args.tool_format](candidates), len(candidates)))
-    elif args.retrieved_from is not None:
-        if args.retrieved_topk < 1:
-            raise ValueError(f"--retrieved_topk must be >= 1, got {args.retrieved_topk}")
-        by_name = {t["tool_name"]: t for t in tools}
-        with open(args.retrieved_from) as f:
-            retrieved_raw = json.load(f)
-        if "samples" not in retrieved_raw:
-            raise ValueError(f"{args.retrieved_from} has no 'samples' key -- not an eval_zeroshot_retriever.py output?")
-        missing_field = [r["query_idx"] for r in retrieved_raw["samples"] if "retrieved_tools" not in r]
-        if missing_field:
-            raise ValueError(
-                f"{args.retrieved_from}: {len(missing_field)} sample(s) have no 'retrieved_tools' field "
-                f"(old schema used 'top5_tools' -- re-run eval_zeroshot_retriever.py to regenerate)"
-            )
-        saved_topk = len(retrieved_raw["samples"][0]["retrieved_tools"])
-        if args.retrieved_topk > saved_topk:
-            raise ValueError(
-                f"--retrieved_topk={args.retrieved_topk} exceeds the {saved_topk} candidates saved per "
-                f"query in {args.retrieved_from} -- re-run eval_zeroshot_retriever.py with a larger --save_topk"
-            )
-        retrieved = {r["query_idx"]: r["retrieved_tools"] for r in retrieved_raw["samples"]}
-        missing_queries = [q["query_idx"] for q in queries if q["query_idx"] not in retrieved]
-        if missing_queries:
-            raise ValueError(
-                f"{len(missing_queries)}/{len(queries)} query_idx from this run are not present in "
-                f"{args.retrieved_from} (e.g. {missing_queries[:5]}) -- was this retriever run against "
-                f"Tier-2 queries, not Tier-1? eval_zeroshot_retriever.py needs --data_path pointed at "
-                f"tier2_parametric.json to produce a compatible file"
-            )
-        unknown_names = {n for names in retrieved.values() for n in names[: args.retrieved_topk]} - set(by_name)
-        if unknown_names:
-            raise ValueError(
-                f"{args.retrieved_from} references tool name(s) not in {TOOLS_CSV}: {sorted(unknown_names)[:5]}"
-            )
-        prompts = []
-        for q in queries:
-            names = retrieved[q["query_idx"]][: args.retrieved_topk]
-            candidates = [by_name[n] for n in names]
-            prompts.append(build_user_prompt(q["query"], TOOL_FORMATS[args.tool_format](candidates), len(candidates)))
-    else:
-        tools_str = TOOL_FORMATS[args.tool_format](tools)
-        prompts = [build_user_prompt(q["query"], tools_str, len(tools)) for q in queries]
-
     semaphore = asyncio.Semaphore(args.concurrency)
-    # Only genuinely per-sample candidate sets are worth logging in full --
-    # --domain_filtered's tool list is one of 3 fixed per-domain blocks
-    # repeated across many samples, same shorten_prompt treatment as all-152
-    # (see that function's docstring in tier1_oracle.py for the motivation).
-    store_full_prompt = args.topk is not None or args.retrieved_from is not None
 
     async def bounded_query(i: int) -> dict:
         async with semaphore:
@@ -308,12 +231,7 @@ def parse_args() -> argparse.Namespace:
                     help="Subsample for a quick pilot run (default: full 3,160 queries)")
     p.add_argument("--concurrency", type=int, default=16)
     p.add_argument("--enable_thinking", action="store_true")
-    p.add_argument("--tool_format", default="domain", choices=list(TOOL_FORMATS))
-    p.add_argument("--topk", type=int, default=None)
-    p.add_argument("--domain_filtered", action="store_true")
-    p.add_argument("--retrieved_from", default=None)
-    p.add_argument("--retrieved_topk", type=int, default=10)
-    p.add_argument("--seed", type=int, default=42)
+    add_candidate_selection_args(p)
     p.add_argument("--output", default=None)
     return p.parse_args()
 
