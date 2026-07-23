@@ -16,8 +16,9 @@ intent_acc 14.3% -> 49.3% with Qwen3-0.6B) either way -- the LoRA adapter is
 just extra weights merged into the same encoder, sharing X (utterance) and Y
 (target_text) as noise_aware_slu/retriever/src/train_retriever.py does.
 
-Corpus: 152 tool texts (signature + description) from tools_registry.csv.
-Queries: Tier-1's 2,146 unique utterances.
+Corpus: 152 tool texts (signature + description) from tools_registry.csv,
+always -- same taxonomy regardless of tier. Queries: --tier's unique
+utterances (tier1: 2,146, tier2: 3,160).
 Metric: Recall@k -- is the gold tool_name within the top-k most similar
 tools by cosine similarity (embeddings are L2-normalized, so cosine sim ==
 dot product)? Directly comparable to tier1_oracle.py's --topk oracle ceiling
@@ -44,11 +45,15 @@ from peft import PeftModel
 from transformers import AutoModel, AutoTokenizer
 
 from embedding_utils import encode_texts
-from tier1_oracle import DATA_PATH, load_unique_queries
+from tier1_oracle import load_unique_queries
 from tools_registry import load_tools
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 TOOLS_CSV = BASE_DIR / "data/Audio2Tool_mod/tools_registry.csv"
+TIER_DATA_PATHS = {
+    "tier1": BASE_DIR / "data/Audio2Tool_mod/public/tier1_direct_data/tier1_direct.json",
+    "tier2": BASE_DIR / "data/Audio2Tool_mod/public/tier2_parametric_data/tier2_parametric.json",
+}
 
 
 def main(args: argparse.Namespace) -> None:
@@ -66,7 +71,7 @@ def main(args: argparse.Namespace) -> None:
     tool_names = [t["tool_name"] for t in tools]
     tool_domains = [t["domain"] for t in tools]
 
-    queries = load_unique_queries(DATA_PATH)
+    queries = load_unique_queries(TIER_DATA_PATHS[args.tier])
     if args.n_queries is not None:
         queries = queries[:: max(1, len(queries) // args.n_queries)][: args.n_queries]
 
@@ -108,7 +113,7 @@ def main(args: argparse.Namespace) -> None:
 
     n = len(queries)
     label = f"STOP-trained retriever (LoRA={args.lora_adapter})" if args.lora_adapter else "Zero-shot retriever (no training)"
-    print(f"\n{label} | model={args.model} | n={n} queries, {len(tools)} tools")
+    print(f"\n{label} | model={args.model} | {args.tier} | n={n} queries, {len(tools)} tools")
     for k in topk_list:
         print(
             f"  recall@{k}: {hits[k]}/{n} = {hits[k] / n * 100:.1f}%   "
@@ -123,6 +128,8 @@ def main(args: argparse.Namespace) -> None:
         tag = f"{model_name}_lora-{adapter_path.parent.name}-{adapter_path.name}"
     else:
         tag = model_name
+    if args.tier != "tier1":
+        tag = f"{tag}_{args.tier}"
     out_path = Path(args.output) if args.output else BASE_DIR / f"experiment/zeroshot_retriever/{tag}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
@@ -130,6 +137,7 @@ def main(args: argparse.Namespace) -> None:
             {
                 "model": args.model,
                 "lora_adapter": args.lora_adapter,
+                "tier": args.tier,
                 "n_queries": n,
                 "n_tools": len(tools),
                 "recall_at_k": {k: hits[k] / n * 100 for k in topk_list},
@@ -144,6 +152,9 @@ def main(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="model/Qwen3-0.6B")
+    p.add_argument("--tier", default="tier1", choices=list(TIER_DATA_PATHS),
+                    help="Which tier's queries to retrieve against (corpus is always the same "
+                         "152-tool taxonomy regardless of tier)")
     p.add_argument("--lora_adapter", default=None,
                     help="Path to a trained LoRA adapter (e.g. one of noise_aware_slu's STOP-trained "
                          "retriever checkpoints) to test cross-domain transfer with zero Audio2Tool "

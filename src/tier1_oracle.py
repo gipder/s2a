@@ -124,16 +124,25 @@ def build_user_prompt(query: str, tools_str: str, n_tools: int) -> str:
 
 def shorten_prompt(prompt: str) -> str:
     """Replace the tool-listing block with a pointer to tools_registry.csv.
-    Only used for the full-152-tool case (--topk unset): logging the same
-    ~27k-char tool block in every one of 2,146 sample records would bloat the
-    output JSON for no benefit, since it's identical across samples and fully
-    reconstructible from tools_registry.csv + --tool_format. --topk runs keep
-    the full prompt since it's already short (just the k sampled candidates,
-    which DO vary per sample)."""
+    Used whenever the candidate set is constant across many samples --
+    full-152 (--topk/--domain_filtered/--retrieved_from all unset) and
+    --domain_filtered alike: the latter's tool list is one of only 3 fixed
+    per-domain blocks (up to 86 tools, smart_car), repeated verbatim across
+    every sample of that domain, so logging it in full blew up a Tier-2
+    domain_filtered run to 29.7MB (vs. 2.7MB for all152) for zero benefit --
+    both are fully reconstructible from tools_registry.csv + this run's
+    --tool_format + (for domain_filtered) the sample's own `domain` field.
+    NOT used for --topk/--retrieved_from, where the candidate set is
+    genuinely per-sample (random distractors / actual retrieval), so there's
+    real information to keep. The placeholder deliberately doesn't restate
+    the tool count itself -- it's already visible in the kept
+    "(N total)" prefix, so it can't drift out of sync with the actual N
+    (a hardcoded "152" here would be silently wrong for a 53-tool domain
+    block)."""
     return re.sub(
         r"(Available tools \(\d+ total\), grouped by domain:\n).*?(?=\n\nUser utterance:)",
-        r"\1<all 152 tools from data/Audio2Tool_mod/tools_registry.csv -- "
-        r"formatting per this run's tool_format, see out_data['tool_format']>",
+        r"\1<tool list omitted -- reconstructible from data/Audio2Tool_mod/tools_registry.csv "
+        r"+ this run's tool_format + (if domain_filtered) this sample's domain field>",
         prompt,
         flags=re.DOTALL,
     )
@@ -305,7 +314,11 @@ async def run_async(args: argparse.Namespace) -> None:
         prompts = [build_user_prompt(q["query"], tools_str, len(tools)) for q in queries]
 
     semaphore = asyncio.Semaphore(args.concurrency)
-    store_full_prompt = args.topk is not None or args.domain_filtered or args.retrieved_from is not None
+    # Only genuinely per-sample candidate sets are worth logging in full --
+    # --domain_filtered's tool list is one of 3 fixed per-domain blocks
+    # repeated across many samples, same shorten_prompt treatment as all-152
+    # (see that function's docstring for the 29.7MB-vs-2.7MB motivation).
+    store_full_prompt = args.topk is not None or args.retrieved_from is not None
 
     async def bounded_query(i: int) -> dict:
         async with semaphore:

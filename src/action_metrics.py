@@ -33,6 +33,7 @@ class ActionParseError(ValueError):
 # ---------------------------------------------------------------------------
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def parse_canonical_action(text: str) -> Dict[str, Any]:
@@ -86,6 +87,15 @@ def parse_canonical_action(text: str) -> Dict[str, Any]:
                 i += 2
                 continue
             if ch == "'":
+                # Doubled '' is SQL-style escaping for a literal apostrophe
+                # inside the string (Audio2Tool gold uses this alongside the
+                # backslash style above, e.g. "the purifier in the kids'' room") --
+                # only treated as an escape if content follows, so a genuine
+                # closing quote at end-of-string isn't swallowed.
+                if i + 1 < len(s) and s[i + 1] == "'":
+                    chars.append("'")
+                    i += 2
+                    continue
                 return "".join(chars), i + 1
             chars.append(ch)
             i += 1
@@ -140,11 +150,56 @@ def parse_canonical_action(text: str) -> Dict[str, Any]:
             if p >= len(s) or s[p] != "]":
                 raise ActionParseError(f"expected ']' at {p}")
             return items, p + 1
-        ident, p = parse_ident(p)
-        p = skip_ws(p)
-        if p < len(s) and s[p] == "(":
-            return parse_call_body(ident, p)
-        raise ActionParseError(f"unexpected token at {p}: {s[p:p + 20]!r}")
+        if p < len(s) and s[p] == "{":
+            # Dict-literal value (rare -- e.g. setThermostatSchedule's
+            # schedule={'07:00': 72, '22:00': 68}). Captured as an opaque,
+            # whitespace-normalized string rather than structurally parsed:
+            # the {"intent", "slots"} dict shape is how nested action calls
+            # are represented in this same tree (see parse_call_body), so a
+            # plain literal dict needs to stay clearly distinguishable to
+            # every function downstream that assumes "dict value == nested
+            # call" (_action_eq, _flatten_slot_pairs, _leaf_text) -- treating
+            # it as a string sidesteps that ambiguity entirely, at the cost of
+            # comparing this value type literally rather than structurally
+            # (key order / whitespace sensitive), acceptable given how rare
+            # dict-valued arguments are in this dataset.
+            depth = 1
+            i = p + 1
+            in_str: str | None = None  # active quote char, or None
+            while i < len(s) and depth > 0:
+                ch = s[i]
+                if in_str:
+                    if ch == "\\" and i + 1 < len(s):
+                        i += 1
+                    elif ch == in_str:
+                        in_str = None
+                elif ch in ("'", '"'):
+                    in_str = ch
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                i += 1
+            if depth != 0:
+                raise ActionParseError(f"unterminated '{{' at {p}")
+            return " ".join(s[p:i].split()), i
+        # Bare numeric literal (int or float, optional leading '-') -- Tier-2+
+        # gold strings use these unquoted for numeric args, e.g.
+        # setFanMode(deviceId='fan_1', mode='On', speed=7).
+        if p < len(s) and (s[p].isdigit() or s[p] == "-"):
+            m = _NUMBER_RE.match(s, p)
+            if m:
+                return m.group(0), m.end()
+        ident, p2 = parse_ident(p)
+        p2 = skip_ws(p2)
+        if p2 < len(s) and s[p2] == "(":
+            return parse_call_body(ident, p2)
+        # Bare identifier used as a literal value rather than a nested call --
+        # Tier-2+ gold strings use this for booleans, e.g.
+        # setAdaptiveLighting(enabled=true). Returned as-is (a plain string,
+        # like every other leaf value here); comparison is case-insensitive
+        # (_normalize_text upper-cases), so "true" == "True" == "TRUE".
+        return ident, p2
 
     p = skip_ws(0)
     name, p = parse_ident(p)
